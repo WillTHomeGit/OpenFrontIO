@@ -9,7 +9,7 @@
  *
  * - **Inlined neighbor traversal**: All neighbor iteration is manually inlined
  *   to avoid function call overhead in hot loops. This is intentional and
- *   critical for performance.
+ *   critical for performance—do not refactor into callbacks.
  *
  * - **Cached map dimensions**: Grid dimensions are cached to avoid repeated
  *   virtual method calls during traversal.
@@ -129,7 +129,7 @@ export function bfsFindPlayerOwnedLakeShore(
       const tile = currentLevel[i];
       const col = tile % width;
 
-      // Up neighbor
+      // Up
       if (tile >= width) {
         const neighbor = tile - width;
         if (flags[neighbor] !== gen) {
@@ -144,7 +144,7 @@ export function bfsFindPlayerOwnedLakeShore(
         }
       }
 
-      // Down neighbor
+      // Down
       if (tile < lastRowStart) {
         const neighbor = tile + width;
         if (flags[neighbor] !== gen) {
@@ -159,7 +159,7 @@ export function bfsFindPlayerOwnedLakeShore(
         }
       }
 
-      // Left neighbor
+      // Left
       if (col > 0) {
         const neighbor = tile - 1;
         if (flags[neighbor] !== gen) {
@@ -174,7 +174,7 @@ export function bfsFindPlayerOwnedLakeShore(
         }
       }
 
-      // Right neighbor
+      // Right
       if (col < width - 1) {
         const neighbor = tile + 1;
         if (flags[neighbor] !== gen) {
@@ -242,7 +242,7 @@ export function bfsFindClosestShore(
       const tile = currentLevel[i];
       const col = tile % width;
 
-      // Up neighbor
+      // Up
       if (tile >= width) {
         const neighbor = tile - width;
         if (flags[neighbor] !== gen) {
@@ -257,7 +257,7 @@ export function bfsFindClosestShore(
         }
       }
 
-      // Down neighbor
+      // Down
       if (tile < lastRowStart) {
         const neighbor = tile + width;
         if (flags[neighbor] !== gen) {
@@ -272,7 +272,7 @@ export function bfsFindClosestShore(
         }
       }
 
-      // Left neighbor
+      // Left
       if (col > 0) {
         const neighbor = tile - 1;
         if (flags[neighbor] !== gen) {
@@ -287,7 +287,7 @@ export function bfsFindClosestShore(
         }
       }
 
-      // Right neighbor
+      // Right
       if (col < width - 1) {
         const neighbor = tile + 1;
         if (flags[neighbor] !== gen) {
@@ -320,7 +320,7 @@ export function bfsFindClosestShore(
  *
  * Traversal is restricted to non-land tiles (water and coastal terrain).
  * This ensures pathfinding respects water body boundaries and does not
- * cross land masses.
+ * traverse across land masses.
  *
  * @param map - The game map.
  * @param start - The starting tile reference.
@@ -362,7 +362,7 @@ export function bfsFindClosestInSet(
       const tile = currentLevel[i];
       const col = tile % width;
 
-      // Up neighbor
+      // Up
       if (tile >= width) {
         const neighbor = tile - width;
         if (flags[neighbor] !== gen) {
@@ -377,7 +377,7 @@ export function bfsFindClosestInSet(
         }
       }
 
-      // Down neighbor
+      // Down
       if (tile < lastRowStart) {
         const neighbor = tile + width;
         if (flags[neighbor] !== gen) {
@@ -392,7 +392,7 @@ export function bfsFindClosestInSet(
         }
       }
 
-      // Left neighbor
+      // Left
       if (col > 0) {
         const neighbor = tile - 1;
         if (flags[neighbor] !== gen) {
@@ -407,7 +407,7 @@ export function bfsFindClosestInSet(
         }
       }
 
-      // Right neighbor
+      // Right
       if (col < width - 1) {
         const neighbor = tile + 1;
         if (flags[neighbor] !== gen) {
