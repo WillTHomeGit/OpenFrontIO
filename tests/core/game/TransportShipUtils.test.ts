@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { beforeAll, describe, expect, test } from "vitest";
 import {
   Game,
