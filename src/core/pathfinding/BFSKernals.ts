@@ -1,147 +1,99 @@
 /**
  * @fileoverview Performance-optimized BFS kernels for tile-based pathfinding.
  *
- * This module provides specialized breadth-first search implementations that
- * prioritize execution speed over flexibility. Key optimizations include:
+ * Provides specialized breadth-first search implementations optimized for
+ * maximum JIT compiler efficiency. Key design decisions:
  *
  * - **Generation-based visited tracking**: Uses a persistent Uint32Array with
  *   incrementing generation counters, eliminating O(N) clearing between searches.
  *
- * - **Inlined neighbor traversal**: Avoids callback overhead by embedding
- *   traversal and target logic directly in each kernel.
+ * - **Inlined neighbor traversal**: All neighbor iteration is manually inlined
+ *   to avoid function call overhead in hot loops. This is intentional and
+ *   critical for performance.
  *
- * - **Cached map dimensions**: Reduces virtual method calls in hot loops.
+ * - **Cached map dimensions**: Grid dimensions are cached to avoid repeated
+ *   virtual method calls during traversal.
  *
- * Memory Footprint: ~4 bytes per tile (~32MB for an 8M tile map).
+ * Memory: ~4 bytes per tile (~32MB for an 8M tile map).
  *
  * @warning These functions are NOT reentrant. BFS operations must be sequential.
  *
- * @module core/pathfinding/BFSOptimizedKernels
+ * @module core/pathfinding/BFSKernels
  */
 
 import { Game, Player } from "../game/Game";
 import { GameMap, TileRef } from "../game/GameMap";
 
+/** Maximum generation value before overflow reset. */
 const MAX_GENERATION = 0xffffffff;
+
+/** Initial generation value (0 represents "never visited"). */
 const INITIAL_GENERATION = 1;
 
-interface BFSState {
-  visitedFlags: Uint32Array | null;
-  generation: number;
-  width: number;
-  height: number;
-  size: number;
-  lastRowStart: number;
-}
+// ---------------------------------------------------------------------------
+// Global BFS State
+// ---------------------------------------------------------------------------
+// Shared state enables zero-allocation searches by reusing the visited buffer
+// across all BFS operations. The generation counter allows O(1) "clearing"
+// by simply incrementing the threshold for what constitutes "visited".
+// ---------------------------------------------------------------------------
 
-const state: BFSState = {
-  visitedFlags: null,
-  generation: INITIAL_GENERATION,
-  width: 0,
-  height: 0,
-  size: 0,
-  lastRowStart: 0,
-};
+let generation: number = INITIAL_GENERATION;
+let visitedFlags: Uint32Array | null = null;
+
+let cachedWidth: number = 0;
+let cachedSize: number = 0;
+let cachedLastRowStart: number = 0;
 
 /**
- * Ensures the global visited buffer matches the current map dimensions.
- * Reinitializes the buffer if the map size has changed.
+ * Ensures the global visited buffer is allocated and sized for the given map.
+ * Reinitializes if the map dimensions have changed.
  *
  * @param map - The game map to prepare for BFS operations.
  */
-function prepareBFSState(map: GameMap): void {
+export function prepareBFSState(map: GameMap): void {
   const width = map.width();
   const height = map.height();
   const size = width * height;
 
-  if (state.visitedFlags === null || state.size !== size) {
-    state.visitedFlags = new Uint32Array(size);
-    state.width = width;
-    state.height = height;
-    state.size = size;
-    state.lastRowStart = (height - 1) * width;
-    state.generation = INITIAL_GENERATION;
+  if (visitedFlags === null || cachedSize !== size) {
+    visitedFlags = new Uint32Array(size);
+    cachedWidth = width;
+    cachedSize = size;
+    cachedLastRowStart = (height - 1) * width;
+    generation = INITIAL_GENERATION;
   }
 }
 
 /**
  * Advances the generation counter for visited tracking.
  *
- * Wrapping is handled automatically; the buffer is cleared only when
- * the generation counter overflows (~4 billion operations).
+ * On overflow (after ~4 billion searches), resets the counter and clears
+ * the visited buffer. This is the only scenario requiring O(N) work.
  */
-function advanceGeneration(): void {
-  state.generation++;
-
-  if (state.generation === MAX_GENERATION) {
-    state.generation = INITIAL_GENERATION;
-    state.visitedFlags!.fill(0);
+export function advanceGeneration(): void {
+  generation++;
+  if (generation === MAX_GENERATION) {
+    generation = INITIAL_GENERATION;
+    visitedFlags!.fill(0);
   }
 }
 
-type NeighborCallback = (neighbor: TileRef) => void;
-
-/**
- * Iterates over valid cardinal neighbors of a tile, invoking the callback
- * for each unvisited neighbor.
- *
- * @param tile - The source tile reference.
- * @param generation - The current BFS generation.
- * @param callback - Function to invoke for each unvisited neighbor.
- */
-function forEachUnvisitedNeighbor(
-  tile: TileRef,
-  generation: number,
-  callback: NeighborCallback,
-): void {
-  const { visitedFlags, width, lastRowStart } = state;
-  const flags = visitedFlags!;
-  const col = tile % width;
-
-  // Up
-  if (tile >= width) {
-    const neighbor = tile - width;
-    if (flags[neighbor] !== generation) {
-      flags[neighbor] = generation;
-      callback(neighbor);
-    }
-  }
-
-  // Down
-  if (tile < lastRowStart) {
-    const neighbor = tile + width;
-    if (flags[neighbor] !== generation) {
-      flags[neighbor] = generation;
-      callback(neighbor);
-    }
-  }
-
-  // Left
-  if (col > 0) {
-    const neighbor = tile - 1;
-    if (flags[neighbor] !== generation) {
-      flags[neighbor] = generation;
-      callback(neighbor);
-    }
-  }
-
-  // Right
-  if (col < width - 1) {
-    const neighbor = tile + 1;
-    if (flags[neighbor] !== generation) {
-      flags[neighbor] = generation;
-      callback(neighbor);
-    }
-  }
-}
+// ---------------------------------------------------------------------------
+// BFS Kernels
+// ---------------------------------------------------------------------------
+// Each kernel is a specialized BFS implementation with inlined traversal
+// logic. The repetitive structure is intentional—extracting helper functions
+// would introduce call overhead in performance-critical inner loops.
+// ---------------------------------------------------------------------------
 
 /**
  * Finds the nearest player-owned tile reachable through lake or shore tiles.
  *
- * Traversal is restricted to water-adjacent terrain (lakes and shores).
- * When multiple targets exist at the same depth, returns the highest tile index.
+ * Traversal is restricted to lake and shore terrain. When multiple targets
+ * exist at the same BFS depth, returns the highest tile index for determinism.
  *
- * @param game - The game instance.
+ * @param game - The game instance providing ownership and terrain data.
  * @param start - The starting tile reference.
  * @param player - The player whose territory to search for.
  * @param maxDepth - Maximum BFS depth to search.
@@ -160,9 +112,12 @@ export function bfsFindPlayerOwnedLakeShore(
     return start;
   }
 
-  const generation = state.generation;
-  state.visitedFlags![start] = generation;
+  const width = cachedWidth;
+  const lastRowStart = cachedLastRowStart;
+  const flags = visitedFlags!;
+  const gen = generation;
 
+  flags[start] = gen;
   let currentLevel: TileRef[] = [start];
   let nextLevel: TileRef[] = [];
 
@@ -170,24 +125,78 @@ export function bfsFindPlayerOwnedLakeShore(
     nextLevel.length = 0;
     let bestMatch: TileRef | null = null;
 
-    for (const tile of currentLevel) {
-      forEachUnvisitedNeighbor(tile, generation, (neighbor) => {
-        if (game.owner(neighbor) === player) {
-          if (bestMatch === null || neighbor > bestMatch) {
-            bestMatch = neighbor;
+    for (let i = 0; i < currentLevel.length; i++) {
+      const tile = currentLevel[i];
+      const col = tile % width;
+
+      // Up neighbor
+      if (tile >= width) {
+        const neighbor = tile - width;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (game.owner(neighbor) === player) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (game.isLake(neighbor) || game.isShore(neighbor)) {
+            nextLevel.push(neighbor);
           }
         }
-        if (game.isLake(neighbor) || game.isShore(neighbor)) {
-          nextLevel.push(neighbor);
+      }
+
+      // Down neighbor
+      if (tile < lastRowStart) {
+        const neighbor = tile + width;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (game.owner(neighbor) === player) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (game.isLake(neighbor) || game.isShore(neighbor)) {
+            nextLevel.push(neighbor);
+          }
         }
-      });
+      }
+
+      // Left neighbor
+      if (col > 0) {
+        const neighbor = tile - 1;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (game.owner(neighbor) === player) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (game.isLake(neighbor) || game.isShore(neighbor)) {
+            nextLevel.push(neighbor);
+          }
+        }
+      }
+
+      // Right neighbor
+      if (col < width - 1) {
+        const neighbor = tile + 1;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (game.owner(neighbor) === player) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (game.isLake(neighbor) || game.isShore(neighbor)) {
+            nextLevel.push(neighbor);
+          }
+        }
+      }
     }
 
     if (bestMatch !== null) {
       return bestMatch;
     }
 
-    [currentLevel, nextLevel] = [nextLevel, currentLevel];
+    const temp = currentLevel;
+    currentLevel = nextLevel;
+    nextLevel = temp;
   }
 
   return null;
@@ -197,7 +206,7 @@ export function bfsFindPlayerOwnedLakeShore(
  * Finds the nearest shore tile reachable through unowned water tiles.
  *
  * Traversal is restricted to unowned tiles (open water). Shore tiles are
- * valid targets regardless of ownership, enabling navigation to enemy coasts.
+ * valid targets regardless of ownership, enabling navigation to any coast.
  *
  * @param map - The game map.
  * @param start - The starting tile reference.
@@ -216,9 +225,12 @@ export function bfsFindClosestShore(
     return start;
   }
 
-  const generation = state.generation;
-  state.visitedFlags![start] = generation;
+  const width = cachedWidth;
+  const lastRowStart = cachedLastRowStart;
+  const flags = visitedFlags!;
+  const gen = generation;
 
+  flags[start] = gen;
   let currentLevel: TileRef[] = [start];
   let nextLevel: TileRef[] = [];
 
@@ -226,34 +238,89 @@ export function bfsFindClosestShore(
     nextLevel.length = 0;
     let bestMatch: TileRef | null = null;
 
-    for (const tile of currentLevel) {
-      forEachUnvisitedNeighbor(tile, generation, (neighbor) => {
-        if (map.isShore(neighbor)) {
-          if (bestMatch === null || neighbor > bestMatch) {
-            bestMatch = neighbor;
+    for (let i = 0; i < currentLevel.length; i++) {
+      const tile = currentLevel[i];
+      const col = tile % width;
+
+      // Up neighbor
+      if (tile >= width) {
+        const neighbor = tile - width;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (map.isShore(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.hasOwner(neighbor)) {
+            nextLevel.push(neighbor);
           }
         }
-        if (!map.hasOwner(neighbor)) {
-          nextLevel.push(neighbor);
+      }
+
+      // Down neighbor
+      if (tile < lastRowStart) {
+        const neighbor = tile + width;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (map.isShore(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.hasOwner(neighbor)) {
+            nextLevel.push(neighbor);
+          }
         }
-      });
+      }
+
+      // Left neighbor
+      if (col > 0) {
+        const neighbor = tile - 1;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (map.isShore(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.hasOwner(neighbor)) {
+            nextLevel.push(neighbor);
+          }
+        }
+      }
+
+      // Right neighbor
+      if (col < width - 1) {
+        const neighbor = tile + 1;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (map.isShore(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.hasOwner(neighbor)) {
+            nextLevel.push(neighbor);
+          }
+        }
+      }
     }
 
     if (bestMatch !== null) {
       return bestMatch;
     }
 
-    [currentLevel, nextLevel] = [nextLevel, currentLevel];
+    const temp = currentLevel;
+    currentLevel = nextLevel;
+    nextLevel = temp;
   }
 
   return null;
 }
 
 /**
- * Finds the nearest tile contained within a specified target set.
+ * Finds the nearest tile from a target set reachable via water traversal.
  *
- * Traversal is unrestricted; all tiles are considered passable.
- * Useful for pathfinding to arbitrary collections of goal tiles.
+ * Traversal is restricted to non-land tiles (water and coastal terrain).
+ * This ensures pathfinding respects water body boundaries and does not
+ * cross land masses.
  *
  * @param map - The game map.
  * @param start - The starting tile reference.
@@ -278,9 +345,12 @@ export function bfsFindClosestInSet(
   prepareBFSState(map);
   advanceGeneration();
 
-  const generation = state.generation;
-  state.visitedFlags![start] = generation;
+  const width = cachedWidth;
+  const lastRowStart = cachedLastRowStart;
+  const flags = visitedFlags!;
+  const gen = generation;
 
+  flags[start] = gen;
   let currentLevel: TileRef[] = [start];
   let nextLevel: TileRef[] = [];
 
@@ -288,22 +358,78 @@ export function bfsFindClosestInSet(
     nextLevel.length = 0;
     let bestMatch: TileRef | null = null;
 
-    for (const tile of currentLevel) {
-      forEachUnvisitedNeighbor(tile, generation, (neighbor) => {
-        if (targetSet.has(neighbor)) {
-          if (bestMatch === null || neighbor > bestMatch) {
-            bestMatch = neighbor;
+    for (let i = 0; i < currentLevel.length; i++) {
+      const tile = currentLevel[i];
+      const col = tile % width;
+
+      // Up neighbor
+      if (tile >= width) {
+        const neighbor = tile - width;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (targetSet.has(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.isLand(neighbor)) {
+            nextLevel.push(neighbor);
           }
         }
-        nextLevel.push(neighbor);
-      });
+      }
+
+      // Down neighbor
+      if (tile < lastRowStart) {
+        const neighbor = tile + width;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (targetSet.has(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.isLand(neighbor)) {
+            nextLevel.push(neighbor);
+          }
+        }
+      }
+
+      // Left neighbor
+      if (col > 0) {
+        const neighbor = tile - 1;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (targetSet.has(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.isLand(neighbor)) {
+            nextLevel.push(neighbor);
+          }
+        }
+      }
+
+      // Right neighbor
+      if (col < width - 1) {
+        const neighbor = tile + 1;
+        if (flags[neighbor] !== gen) {
+          flags[neighbor] = gen;
+          if (targetSet.has(neighbor)) {
+            if (bestMatch === null || neighbor > bestMatch)
+              bestMatch = neighbor;
+          }
+          if (!map.isLand(neighbor)) {
+            nextLevel.push(neighbor);
+          }
+        }
+      }
     }
 
     if (bestMatch !== null) {
       return bestMatch;
     }
 
-    [currentLevel, nextLevel] = [nextLevel, currentLevel];
+    const temp = currentLevel;
+    currentLevel = nextLevel;
+    nextLevel = temp;
   }
 
   return null;
