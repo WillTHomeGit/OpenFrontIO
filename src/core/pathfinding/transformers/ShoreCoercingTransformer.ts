@@ -15,6 +15,7 @@ export class ShoreCoercingTransformer implements PathFinder<number> {
   constructor(
     private inner: PathFinder<number>,
     private map: GameMap,
+    private findBestShoreNeighbor: boolean = true, // Default to true to pick best connected water neighbor.
   ) {}
 
   findPath(from: TileRef | TileRef[], to: TileRef): TileRef[] | null {
@@ -78,12 +79,25 @@ export class ShoreCoercingTransformer implements PathFinder<number> {
       return { water: tile, original: null };
     }
 
+    let best: TileRef | null = null;
+    let maxScore = -1;
+
     // Find adjacent water neighbor
     for (const n of this.map.neighbors(tile)) {
       if (this.map.isWater(n)) {
-        return { water: n, original: tile };
+        if (!this.findBestShoreNeighbor) return { water: n, original: tile };
+
+        let score = 0; // Score by counting its own water neighbors
+        for (const nn of this.map.neighbors(n)) if (this.map.isWater(nn)) score++;
+
+        if (score > maxScore) {
+          maxScore = score;
+          best = n;
+        }
       }
     }
+
+    if (best !== null) return { water: best, original: tile };
 
     // No water neighbor found - let HPA* handle at minimap level
     return { water: null, original: tile };
